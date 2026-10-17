@@ -2,5 +2,4 @@ fastapi
 uvicorn[standard]
 telethon
 cryptg
-pyzipper
 python-dotenv
