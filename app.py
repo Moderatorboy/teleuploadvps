@@ -20,7 +20,10 @@ from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 from telethon import TelegramClient
 
-load_dotenv()
+try:
+    load_dotenv()  # systemd's EnvironmentFile already provides the variables
+except PermissionError:
+    pass
 log = logging.getLogger("teleupload")
 logging.basicConfig(level=logging.INFO)
 
