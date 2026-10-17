@@ -1,6 +1,5 @@
 """TeleUpload backend: chunked upload -> AES zip -> Telegram (MTProto) -> 15 min download link."""
 import asyncio
-import hmac
 import json
 import logging
 import os
@@ -33,7 +32,6 @@ BOT_TOKEN = os.environ["TG_BOT_TOKEN"]
 CHAT_ID = int(os.environ["TG_CHAT_ID"])
 # private backup channel: gets the raw file (no zip, no password). Never shown to users.
 BACKUP_CHAT_ID = int(os.environ["TG_BACKUP_CHAT_ID"]) if os.environ.get("TG_BACKUP_CHAT_ID") else None
-LOGIN_PASSWORD = os.environ["TELEUPLOAD_PASSWORD"]
 PUBLIC_BASE = os.environ.get("PUBLIC_BASE", "https://www.b2gpt.online/teleupload").rstrip("/")
 ORIGINS = os.environ.get(
     "ALLOWED_ORIGINS", "https://www.b2gpt.online,https://b2gpt.online"
@@ -46,11 +44,13 @@ MAX_SIZE = 1024**3          # 1 GB
 LINK_TTL = 15 * 60          # 15 minutes
 MAX_CHUNK = 16 * 1024 * 1024
 MAX_ACTIVE = 4
+MAX_PER_HOUR = int(os.environ.get("IP_UPLOADS_PER_HOUR", "5"))
+MAX_BYTES_PER_DAY = int(os.environ.get("IP_GB_PER_DAY", "3")) * 1024**3
 SLUG_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
 
 client = TelegramClient(str(DATA / "teleupload_session"), API_ID, API_HASH)
 sessions: dict = {}
-fails: dict = {}
+uploads: dict = {}  # ip -> [(time, size)]
 tasks: set = set()
 work_sem = asyncio.Semaphore(1)  # one zip+send at a time (protects CPU/disk)
 
@@ -237,14 +237,18 @@ def get_session(sid: str, state: str | None = None) -> dict:
 @app.post("/upload/init")
 async def upload_init(body: InitBody, request: Request):
     ip, now = client_ip(request), time.time()
-    recent = [t for t in fails.get(ip, []) if now - t < 600]
-    if len(recent) >= 10:
-        raise HTTPException(429, "Bahut zyada galat try. 10 minute baad try karein.")
-    if not hmac.compare_digest(body.password.encode(), LOGIN_PASSWORD.encode()):
-        fails[ip] = recent + [now]
-        raise HTTPException(401, "Password galat hai.")
+    if not 4 <= len(body.password) <= 128:
+        raise HTTPException(400, "Password 4 se 128 characters ka rakhein.")
     if not 0 < body.size <= MAX_SIZE:
         raise HTTPException(400, "File 1 GB se chhoti (aur khaali nahi) honi chahiye.")
+    hist = [(t, n) for t, n in uploads.get(ip, []) if now - t < 86400]
+    uploads[ip] = hist
+    if any(v["ip"] == ip and v["state"] not in ("done", "error") for v in sessions.values()):
+        raise HTTPException(429, "Pehli upload poori hone dein, phir nayi shuru karein.")
+    if sum(1 for t, _ in hist if now - t < 3600) >= MAX_PER_HOUR:
+        raise HTTPException(429, "Ek ghante mein bahut uploads ho gaye. Thodi der baad try karein.")
+    if sum(n for _, n in hist) + body.size > MAX_BYTES_PER_DAY:
+        raise HTTPException(429, "Aaj ki upload limit poori ho gayi. Kal try karein.")
     if sum(v["state"] != "done" and v["state"] != "error" for v in sessions.values()) >= MAX_ACTIVE:
         raise HTTPException(429, "Server abhi busy hai. Thodi der baad try karein.")
     if shutil.disk_usage(DATA).free < body.size * 2.2 + 500 * 1024**2:
@@ -258,9 +262,10 @@ async def upload_init(body: InitBody, request: Request):
     sessions[sid] = {
         "raw": str(raw), "filename": Path(body.filename).name.strip() or "file",
         "size": body.size, "password": body.password, "title": body.title.strip()[:700],
-        "linkname": body.linkname.strip(), "state": "uploading", "received": 0,
+        "linkname": body.linkname.strip(), "ip": ip, "state": "uploading", "received": 0,
         "progress": 0, "created": now,
     }
+    uploads[ip].append((now, body.size))
     return {"ok": True, "upload_id": sid}
 
 
