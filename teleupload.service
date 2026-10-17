@@ -1,0 +1,15 @@
+[Unit]
+Description=TeleUpload backend
+After=network-online.target
+
+[Service]
+WorkingDirectory=/opt/teleupload
+EnvironmentFile=/opt/teleupload/.env
+ExecStart=/opt/teleupload/venv/bin/uvicorn app:app --host 127.0.0.1 --port 8000
+Environment=DATA_DIR=/var/lib/teleupload
+DynamicUser=yes
+StateDirectory=teleupload
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
